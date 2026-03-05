@@ -1,0 +1,30 @@
+# YOLO training outputs
+runs/
+weights/
+
+# Model files
+*.pt
+*.onnx
+*.engine
+
+# Dataset
+dataset/
+datasets/
+images/
+labels/
+
+# Videos
+*.mp4
+*.avi
+*.mov
+Processed-Videos/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
