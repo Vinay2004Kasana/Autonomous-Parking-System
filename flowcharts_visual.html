@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Project Flowcharts</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+    <style>
+        body { font-family: sans-serif; margin: 40px; background-color: #f4f4f9; }
+        .chart-container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 40px; text-align: center; }
+        h1, h2 { color: #333; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Autonomous Parking System Flowcharts</h1>
+
+    <div class="chart-container">
+        <h2>1. End-to-End System Flow</h2>
+        <div class="mermaid">
+        graph TD
+            classDef inputStyle fill:#2c3e50,stroke:#34495e,stroke-width:2px,color:#ecf0f1
+            classDef yoloStyle fill:#8e44ad,stroke:#9b59b6,stroke-width:2px,color:#fff
+            classDef mapStyle fill:#2980b9,stroke:#3498db,stroke-width:2px,color:#fff
+            classDef logicStyle fill:#27ae60,stroke:#2ecc71,stroke-width:2px,color:#fff
+            classDef overlayStyle fill:#d35400,stroke:#e67e22,stroke-width:2px,color:#fff
+            classDef displayStyle fill:#c0392b,stroke:#e74c3c,stroke-width:2px,color:#fff
+            classDef apiStyle fill:#16a085,stroke:#1abc9c,stroke-width:2px,color:#fff
+            classDef dashboardStyle fill:#f39c12,stroke:#f1c40f,stroke-width:2px,color:#333
+            classDef decision fill:#34495e,stroke:#f1c40f,stroke-width:2px,color:#fff
+            classDef state fill:#7f8c8d,stroke:#95a5a6,stroke-width:2px,color:#fff
+
+            subgraph INPUT ["1. INPUT STAGE"]
+                A1["Pre-recorded Video"]:::inputStyle
+                A2["Live Webcam Feed"]:::inputStyle
+            end
+
+            subgraph YOLO ["2. AI INFERENCE (YOLOv8)"]
+                B["Load Custom Model"]:::yoloStyle
+                C{"Run Detection"}:::decision
+                D1["Class 0: Car"]:::state
+                D2["Class 1: Space Available"]:::state
+                
+                B --> C
+                C --> D1
+                C --> D2
+            end
+
+            A1 --> B
+            A2 --> B
+
+            subgraph MAPPING ["3. SPATIAL MAPPING"]
+                E["Collect Bounding Box"]:::mapStyle
+                F{"First 5 Frames?"}:::decision
+                G["Auto-Calibrate"]:::mapStyle
+                I["Map to Space ID"]:::mapStyle
+
+                E --> F
+                F --> G
+                G --> I
+            end
+
+            D1 --> E
+            D2 --> E
+
+            subgraph LOGIC ["4. STATE MANAGEMENT"]
+                J["Update Space States"]:::logicStyle
+                K["Calculate Stats"]:::logicStyle
+                L{"Any Free Space?"}:::decision
+                M["A* Pathfinding"]:::logicStyle
+
+                J --> K
+                J --> L
+                L --> M
+            end
+
+            I --> J
+
+            subgraph OVERLAY ["5. VIDEO AUGMENTATION"]
+                O["Annotate Video Frame"]:::overlayStyle
+                P1["Draw Bounding Boxes"]:::overlayStyle
+                P2["Draw Space IDs"]:::overlayStyle
+                P3["Draw Navigation Path"]:::overlayStyle
+                Q["Final Annotated Frame"]:::overlayStyle
+
+                O --> P1 & P2 & P3
+                P1 & P2 & P3 --> Q
+            end
+
+            K --> O
+            M --> O
+
+            subgraph DISPLAY ["6. OUTPUT"]
+                R["OpenCV Window"]:::displayStyle
+            end
+            
+            subgraph API ["7. BACKEND SYNC"]
+                S["POST /api/batch_update"]:::apiStyle
+                T["POST /api/init_spaces"]:::apiStyle
+            end
+
+            Q --> R
+            Q --> S
+            G --> T
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <h2>2. Data Flow per Frame</h2>
+        <div class="mermaid">
+        sequenceDiagram
+            autonumber
+            participant V as 📹 Video Feed
+            participant Y as 🧠 YOLOv8 Model
+            participant SM as 📍 SpaceMapper
+            participant PM as ⚙️ ParkingManager
+            participant OV as 🎨 OpenCV Overlay
+
+            V->>Y: Raw frame (BGR)
+            activate Y
+            Y-->>Y: Inference → bounding boxes + classes
+            Y->>SM: Detections (cx, cy, class, conf)
+            deactivate Y
+            
+            activate SM
+            SM-->>SM: Map pixel coords → Space IDs
+            SM->>PM: Space updates (space_id, is_free)
+            deactivate SM
+            
+            activate PM
+            PM-->>PM: Update states + calc stats
+            PM-->>PM: A* pathfinding
+            PM->>OV: Stats + nav_info + space states
+            deactivate PM
+            
+            activate OV
+            OV-->>OV: Draw boxes, IDs, path, HUD
+            OV->>V: Annotated frame → display
+            deactivate OV
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <h2>3. Simplified Code Pipeline</h2>
+        <div class="mermaid">
+        graph TD
+            classDef start fill:#8e44ad,stroke:#732d91,stroke-width:2px,color:#fff,rx:5px,ry:5px
+            classDef process fill:#2980b9,stroke:#1f618d,stroke-width:2px,color:#fff,rx:5px,ry:5px
+            classDef backend fill:#27ae60,stroke:#1e8449,stroke-width:2px,color:#fff,rx:5px,ry:5px
+            classDef display fill:#d35400,stroke:#a04000,stroke-width:2px,color:#fff,rx:5px,ry:5px
+
+            A([Read Video Frame]):::start --> B[YOLOv8 Detection]:::process
+            B --> C[Map Detections to Spaces]:::process
+            C --> D[Update Parking Logic & State]:::process
+            D -->|Find nearest free spot| E[A* Navigation]:::process
+            D -->|Real-time update| F[(Backend API Sync)]:::backend
+            E --> G[Draw Overlay & Path on Frame]:::display
+            F --> G
+            G --> H([Display Frame]):::display
+            H -.->|Loop| A
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <h2>4. File Architecture & Connections</h2>
+        <div class="mermaid">
+        graph TD
+            classDef pyNode fill:#e67e22,stroke:#d35400,stroke-width:2px,color:#fff,rx:5px,ry:5px
+            classDef flaskNode fill:#2ecc71,stroke:#27ae60,stroke-width:2px,color:#fff,rx:5px,ry:5px
+            classDef uiNode fill:#3498db,stroke:#2980b9,stroke-width:2px,color:#fff,rx:5px,ry:5px
+            
+            subgraph "Computer Vision (Client)"
+                PI["parking_integration.py<br>(YOLOv8 & OpenCV)"]:::pyNode
+            end
+
+            subgraph "Backend API Server"
+                PM["parking_manager.py<br>(Flask & A* Path Planner)"]:::flaskNode
+            end
+
+            subgraph "Frontend Dashboard"
+                UI["parking_ui.html<br>(HTML/JS/CSS)"]:::uiNode
+            end
+
+            PI -- "1. Sends continuous YOLO detections<br>POST /api/batch_update" --> PM
+            PI -- "2. Sends video info<br>POST /api/video_info" --> PM
+            
+            PM -- "3. Serves the UI directly<br>GET /dashboard" --> UI
+            
+            UI -- "4. Auto-fetches live state & path<br>GET /api/navigate" --> PM
+            
+            style PI stroke-width:3px
+            style PM stroke-width:3px
+            style UI stroke-width:3px
+        </div>
+    </div>
+</body>
+</html>
