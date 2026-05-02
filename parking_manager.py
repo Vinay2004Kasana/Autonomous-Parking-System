@@ -49,36 +49,45 @@ class ParkingLayout:
         self.lot_height = lot_height
         self.entry_point = (50, lot_height // 2)    # Gate/entry position
         self.spaces: Dict[str, ParkingSpace] = {}
-        self._generate_layout()
+        self.init_dynamic_layout(rows * cols)
 
-    def _generate_layout(self):
-        """Generate parking spaces in a grid with two sections (A & B)"""
+    def init_dynamic_layout(self, total_spaces: int):
+        """Dynamically generate a grid for the given number of spaces."""
+        self.spaces.clear()
+        if total_spaces <= 0:
+            return
+            
+        # Calculate optimal grid dimensions to fit on screen
+        self.cols = math.ceil(math.sqrt(total_spaces * 1.5))
+        self.rows = math.ceil(total_spaces / self.cols)
+        
         margin_x = 120
         margin_y = 80
         spacing_x = (self.lot_width - 2 * margin_x) / max(self.cols - 1, 1)
         spacing_y = (self.lot_height - 2 * margin_y) / max(self.rows - 1, 1)
 
-        section_labels = ["A", "B"]
+        section_labels = ["A", "B", "C", "D", "E", "F"]
         space_w, space_h = 55, 35
 
-        for r in range(self.rows):
-            section = section_labels[0] if r < self.rows // 2 else section_labels[1]
-            for c in range(self.cols):
-                sid = f"{section}{r * self.cols + c + 1:02d}"
-                cx = margin_x + c * spacing_x
-                cy = margin_y + r * spacing_y
-                self.spaces[sid] = ParkingSpace(
-                    id=sid,
-                    row=r,
-                    col=c,
-                    x=cx,
-                    y=cy,
-                    width=space_w,
-                    height=space_h,
-                    is_free=True,
-                    section=section,
-                    last_updated=time.time()
-                )
+        for i in range(total_spaces):
+            r = i // self.cols
+            c = i % self.cols
+            section = section_labels[r % len(section_labels)]
+            sid = f"{section}{i + 1:02d}"
+            cx = margin_x + c * spacing_x
+            cy = margin_y + r * spacing_y
+            self.spaces[sid] = ParkingSpace(
+                id=sid,
+                row=r,
+                col=c,
+                x=cx,
+                y=cy,
+                width=space_w,
+                height=space_h,
+                is_free=True,
+                section=section,
+                last_updated=time.time()
+            )
 
 
 class PathPlanner:
@@ -208,6 +217,21 @@ class ParkingManager:
         self.event_log = deque(maxlen=50)
         self._simulate_initial_state()
 
+    def reset(self):
+        """Reset all spaces to free (call between videos for a clean slate)."""
+        with self._lock:
+            for space in self.layout.spaces.values():
+                space.is_free = True
+                space.last_updated = time.time()
+            self.event_log.clear()
+
+    def init_dynamic_layout(self, total_spaces: int):
+        """Rebuild the parking layout dynamically."""
+        with self._lock:
+            self.layout.init_dynamic_layout(total_spaces)
+            self.event_log.clear()
+            self._log_event(f"System auto-calibrated with {total_spaces} spaces.")
+
     def _simulate_initial_state(self):
         """Pre-fill some spaces as occupied for demo purposes."""
         occupied_ids = ["A01", "A02", "A04", "A07", "B13", "B14", "B16", "B19", "B20", "B22"]
@@ -329,31 +353,55 @@ class ParkingManager:
 
 
 # ─────────────────────────────────────────────────────────────────
-# FLASK API SERVER — runs alongside your existing app.py
+# FLASK API SERVER — serves real-time data to parking_ui.html
+# Receives YOLO detections from parking_integration.py
 # ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
-        from flask import Flask, jsonify, request
+        from flask import Flask, jsonify, request, send_file
         from flask_cors import CORS
     except ImportError:
         print("Install: pip install flask flask-cors")
         exit(1)
 
+    import os
+
     app = Flask(__name__)
     CORS(app)
     manager = ParkingManager()
 
-    # Demo: randomly flip spaces every 10 seconds (replace with real YOLO feed)
-    import random
-    def simulate_yolo():
-        while True:
-            time.sleep(10)
-            space_ids = list(manager.layout.spaces.keys())
-            sid = random.choice(space_ids)
-            space = manager.layout.spaces[sid]
-            manager.update_space(sid, not space.is_free)
+    # Track which video is currently being processed
+    _current_video = {"name": "Waiting for video feed...", "index": 0, "total": 0}
 
-    threading.Thread(target=simulate_yolo, daemon=True).start()
+    @app.route("/")
+    def root():
+        """Root endpoint with API documentation"""
+        return jsonify({
+            "service": "Parking Management API",
+            "version": "2.0",
+            "status": "running",
+            "mode": "LIVE — waiting for YOLO detections from parking_integration.py",
+            "dashboard": "http://localhost:5001/dashboard",
+            "endpoints": {
+                "GET /dashboard": "Open the live parking dashboard in your browser",
+                "GET /api/status": "Get current parking lot statistics",
+                "GET /api/navigate": "Get navigation info to nearest free space",
+                "GET /api/spaces": "Get all parking spaces with their current status",
+                "GET /api/events": "Get recent parking event log",
+                "GET /api/video_info": "Get current video being processed",
+                "POST /api/update": "Update a space status (JSON: {space_id, is_free})",
+                "POST /api/batch_update": "Batch update from YOLO (JSON: [{space_id, is_free, confidence}, ...])",
+                "POST /api/video_info": "Set current video info (JSON: {name, index, total})",
+            },
+        })
+
+    @app.route("/dashboard")
+    def dashboard():
+        """Serve the parking_ui.html dashboard directly."""
+        html_path = os.path.join(os.path.dirname(__file__), "parking_ui.html")
+        if os.path.exists(html_path):
+            return send_file(html_path)
+        return "parking_ui.html not found", 404
 
     @app.route("/api/status")
     def status():
@@ -365,7 +413,10 @@ if __name__ == "__main__":
         section = request.args.get("section")
         if not space_id:
             space_id = manager.find_nearest_free_space(prefer_section=section)
-        return jsonify(manager.get_navigation_info(space_id))
+        nav = manager.get_navigation_info(space_id)
+        # Also include events so dashboard gets everything in one call
+        nav["events"] = manager.get_event_log()
+        return jsonify(nav)
 
     @app.route("/api/spaces")
     def spaces():
@@ -378,9 +429,40 @@ if __name__ == "__main__":
         manager.update_space(data["space_id"], data["is_free"])
         return jsonify({"ok": True})
 
+    @app.route("/api/batch_update", methods=["POST"])
+    def batch_update():
+        """Receive YOLO detection batch from parking_integration.py"""
+        data = request.json
+        if isinstance(data, list):
+            manager.update_from_yolo(data)
+        return jsonify({"ok": True, "updated": len(data) if isinstance(data, list) else 0})
+
+    @app.route("/api/init_spaces", methods=["POST"])
+    def init_spaces():
+        """Initialize the layout with a dynamic number of spaces."""
+        data = request.json
+        if "total" in data:
+            manager.init_dynamic_layout(data["total"])
+        return jsonify({"ok": True})
+
+    @app.route("/api/video_info", methods=["GET", "POST"])
+    def video_info():
+        if request.method == "POST":
+            info = request.json
+            _current_video.update(info)
+            return jsonify({"ok": True})
+        return jsonify(_current_video)
+
     @app.route("/api/events")
     def events():
         return jsonify(manager.get_event_log())
 
-    print("Parking Manager API running on http://localhost:5001")
+    print("=" * 60)
+    print("  PARKVISION API SERVER")
+    print("  API     : http://localhost:5001")
+    print("  Dashboard: http://localhost:5001/dashboard")
+    print("=" * 60)
+    print("  Waiting for YOLO detections from parking_integration.py...")
+    print("  Run: python parking_integration.py --folder Car-Videos/ --api")
+    print("=" * 60)
     app.run(port=5001, debug=False)

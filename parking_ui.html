@@ -474,6 +474,28 @@
   }
   .close-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+  /* Video queue pill styles */
+  .vq-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    transition: all 0.3s;
+  }
+  .vq-pill.active  { border-color: var(--accent2); color: var(--accent2); box-shadow: 0 0 10px rgba(0,255,157,0.3); }
+  .vq-pill.done    { border-color: var(--text-dim); color: var(--text-dim); opacity: 0.5; }
+  .vq-pill.pending { border-color: var(--border); }
+  .vq-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .vq-pill.active .vq-dot  { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); animation: pulse 1s infinite; }
+  .vq-pill.done .vq-dot    { background: var(--text-dim); }
+  .vq-pill.pending .vq-dot { background: var(--border); }
+
   /* Responsive */
   @media (max-width: 900px) {
     .main-grid { grid-template-columns: 1fr; }
@@ -569,6 +591,14 @@
     </div>
   </div>
 
+  <!-- Video Queue Panel -->
+  <div id="video-queue-panel" style="margin-top:16px;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;">
+    <div class="panel-title">Video Queue — Processed One by One</div>
+    <div id="video-queue-list" style="display:flex;flex-wrap:wrap;gap:8px;">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
   <!-- Status bar -->
   <div class="status-bar">
     <span>YOLO Detection Active — camera feed processed at 30fps</span>
@@ -592,11 +622,12 @@
 // ════════════════════════════════════════════════════════
 
 const API_BASE = "http://localhost:5001/api";
-let USE_MOCK = true;   // set false when Flask API is running
+let USE_MOCK = false;   // false = fetch real YOLO data from Flask API
+let apiConnected = false;  // tracks if API is actually responding
 
 // ── MOCK DATA ENGINE (mirrors parking_manager.py) ──────
-const ROWS = 4, COLS = 6;
-const LOT_W = 800, LOT_H = 420;
+let ROWS = 4, COLS = 6;
+const LOT_W = 800, LOT_H = 600;
 const ENTRY = { x: 40, y: LOT_H / 2 };
 
 let spaces = [];
@@ -748,22 +779,47 @@ function drawLot(canvasEl, fullscreen = false) {
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // Label
-    ctx.fillStyle = isTarget ? "#fff" : (s.is_free ? "#00ff9d" : "#ff6688");
-    ctx.font = `bold ${isTarget ? 9 : 8}px 'Share Tech Mono', monospace`;
+    // Label — space ID (large, outlined)
+    const idColor  = isTarget ? "#fff" : (s.is_free ? "#00ff9d" : "#ff6688");
+    const idScale  = isTarget ? 10 : 9;
+
+    // Outline pass (black)
+    ctx.font = `bold ${idScale + 1}px 'Share Tech Mono', monospace`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(s.id, s.x, s.y);
+    ctx.fillStyle = "rgba(0,0,0,0.9)";
+    for (const [ox, oy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+      ctx.fillText(s.id, s.x + ox, s.y + oy - 4);
+    }
+    // Main text
+    ctx.fillStyle = idColor;
+    ctx.fillText(s.id, s.x, s.y - 4);
+
+    // Status chip below
+    const chipTxt = s.is_free ? "FREE" : "BUSY";
+    const chipCol = s.is_free ? "#00ff9d" : "#ff3366";
+    ctx.font = `bold 7px 'Barlow Condensed', sans-serif`;
+    ctx.fillStyle = chipCol;
+    ctx.fillText(chipTxt, s.x, s.y + 8);
     ctx.restore();
   }
 
-  // Section labels
+  // Dynamic Section labels
   ctx.fillStyle = "rgba(0,212,255,0.15)";
   ctx.font = "bold 48px 'Barlow Condensed', sans-serif";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText("A", 14, LOT_H * 0.28);
-  ctx.fillText("B", 14, LOT_H * 0.72);
+  
+  const sections = {};
+  for (const s of spaces) {
+    if (!sections[s.section]) sections[s.section] = [];
+    sections[s.section].push(s.y);
+  }
+  for (const [sec, yVals] of Object.entries(sections)) {
+    // Find average Y position for this section
+    const avgY = yVals.reduce((a, b) => a + b, 0) / yVals.length;
+    ctx.fillText(sec, 14, avgY);
+  }
 
   // Entry gate
   ctx.save();
@@ -840,6 +896,7 @@ function updateUI() {
   const stats = getStats();
 
   // Stat cards
+  animCountTo("stat-total", spaces.length);
   animCountTo("stat-free", stats.free);
   animCountTo("stat-busy", stats.busy);
   document.getElementById("stat-occ").textContent = stats.occ + "%";
@@ -911,9 +968,57 @@ function animCountTo(id, val) {
   el.textContent = val;
 }
 
-// ── SIMULATION (replaces live YOLO feed in demo) ──────
+// ── VIDEO QUEUE MANAGEMENT ─────────────────────────────
+// Simulates a list of videos being processed one by one.
+// In production, this state comes from the Flask API or CLI output.
+
+const DEMO_VIDEOS = [
+  "parking_lot_morning.mp4",
+  "lot_afternoon_rush.mp4",
+  "evening_session.mp4",
+  "night_timelapse.mp4",
+];
+
+let currentVideoIdx = 0;
+let videoFrameTick  = 0;
+const FRAMES_PER_VIDEO_SIM = 300;   // simulate each video for ~300 ticks
+
+function renderVideoQueue() {
+  const container = document.getElementById("video-queue-list");
+  if (!container) return;
+  container.innerHTML = DEMO_VIDEOS.map((name, i) => {
+    let cls = "pending", icon = "⏳";
+    if (i < currentVideoIdx)  { cls = "done";    icon = "✓"; }
+    if (i === currentVideoIdx){ cls = "active";   icon = "▶"; }
+    return `<div class="vq-pill ${cls}">
+      <div class="vq-dot"></div>
+      <span>${icon} ${name}</span>
+    </div>`;
+  }).join("");
+}
+
+function advanceVideoQueue() {
+  videoFrameTick++;
+  if (videoFrameTick >= FRAMES_PER_VIDEO_SIM) {
+    videoFrameTick = 0;
+    if (currentVideoIdx < DEMO_VIDEOS.length - 1) {
+      currentVideoIdx++;
+      // Reset some spaces to simulate new video state
+      spaces.forEach(s => {
+        s.is_free = Math.random() > 0.4;
+      });
+      eventLog.unshift({
+        time: new Date().toLocaleTimeString(),
+        msg: `Video ${currentVideoIdx + 1} started: ${DEMO_VIDEOS[currentVideoIdx]}`
+      });
+    }
+  }
+}
+
+// ── SIMULATION (fallback when API is not connected) ──────
 let tick = 0;
 function simulate() {
+  if (apiConnected) return;  // Skip fake data when real API is connected
   tick++;
   if (tick % 30 === 0) {   // every ~3 seconds
     const idx = Math.floor(Math.random() * spaces.length);
@@ -929,21 +1034,86 @@ function simulate() {
   }
 }
 
-// ── PRODUCTION API FETCH (uncomment when Flask is live) ─
+// ── LIVE API FETCH (receives real YOLO detections) ──────
 async function fetchFromAPI() {
   try {
-    const res = await fetch(`${API_BASE}/navigate`);
-    const data = await res.json();
-    // Map API response to local spaces
-    if (data.all_spaces) {
-      data.all_spaces.forEach(s => {
-        const local = spaces.find(l => l.id === s.id);
-        if (local) local.is_free = s.is_free;
-      });
+    // Fetch navigation data (includes spaces, path, events)
+    const navRes = await fetch(`${API_BASE}/navigate`);
+    if (!navRes.ok) throw new Error("API not reachable");
+    const nav = await navRes.json();
+
+    apiConnected = true;
+    document.getElementById("last-update").textContent = "✅ LIVE — " + new Date().toLocaleTimeString();
+    document.getElementById("last-update").className = "status-ok";
+
+    // Update space statuses from real API data
+    if (nav.all_spaces) {
+      if (spaces.length !== nav.all_spaces.length) {
+        // Dynamic lot resize detected! Re-create local spaces from API layout
+        spaces = nav.all_spaces.map(s => ({
+          id: s.id,
+          row: s.row,
+          col: s.col,
+          x: s.x,
+          y: s.y,
+          w: s.width,
+          h: s.height,
+          is_free: s.is_free,
+          section: s.section
+        }));
+        
+        // Dynamically compute ROWS and COLS from data
+        let maxR = 0, maxC = 0;
+        for (const s of spaces) {
+            if (s.row > maxR) maxR = s.row;
+            if (s.col > maxC) maxC = s.col;
+        }
+        ROWS = maxR + 1;
+        COLS = maxC + 1;
+      } else {
+        nav.all_spaces.forEach(apiSpace => {
+          const local = spaces.find(l => l.id === apiSpace.id);
+          if (local) {
+            local.is_free = apiSpace.is_free;
+          }
+        });
+      }
     }
-    if (data.path) navPath = data.path;
-    eventLog = data.events || eventLog;
-  } catch (e) { /* Flask not running — using mock */ }
+
+    // Update navigation path
+    if (nav.path && nav.path.length > 0) {
+      navPath = nav.path;
+    }
+
+    // Update event log from API
+    if (nav.events && nav.events.length > 0) {
+      eventLog = nav.events;
+    }
+
+    // Fetch video info
+    try {
+      const vidRes = await fetch(`${API_BASE}/video_info`);
+      const vidInfo = await vidRes.json();
+      if (vidInfo.name && vidInfo.total > 0) {
+        updateVideoQueueFromAPI(vidInfo);
+      }
+    } catch(e) { /* video info optional */ }
+
+  } catch (e) {
+    apiConnected = false;
+    document.getElementById("last-update").textContent = "⚠️ Offline — using demo data";
+    document.getElementById("last-update").style.color = "var(--warn)";
+  }
+}
+
+function updateVideoQueueFromAPI(vidInfo) {
+  const container = document.getElementById("video-queue-list");
+  if (!container) return;
+  container.innerHTML = `
+    <div class="vq-pill active">
+      <div class="vq-dot"></div>
+      <span>▶ [${vidInfo.index}/${vidInfo.total}] ${vidInfo.name}</span>
+    </div>`;
 }
 
 // ── CANVAS CLICK — manual toggle (for demo/testing) ───
@@ -983,11 +1153,13 @@ function updateClock() {
 
 // ── MAIN LOOP ──────────────────────────────────────────
 initSpaces();
+renderVideoQueue();
 
 function loop() {
   animFrame++;
   simulate();
-  if (animFrame % 10 === 0) updateUI();
+  advanceVideoQueue();
+  if (animFrame % 10 === 0) { updateUI(); renderVideoQueue(); }
   drawLot(document.getElementById("lot-canvas"));
   const overlay = document.getElementById("nav-overlay");
   if (overlay.classList.contains("active")) {
@@ -1000,8 +1172,10 @@ setInterval(updateClock, 1000);
 updateUI();
 loop();
 
-// Uncomment for live API:
-// setInterval(fetchFromAPI, 2000);
+// Fetch real data from Flask API every 1.5 seconds
+setInterval(fetchFromAPI, 1500);
+// Also fetch immediately on load
+fetchFromAPI();
 </script>
 </body>
 </html>
